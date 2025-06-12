@@ -1115,6 +1115,60 @@ defmodule BlockScoutWeb.API.V2.TokenControllerTest do
 
       Application.put_env(:indexer, :ipfs, old_env)
     end
+
+    test "metadata dropped on token uri on demand filler", %{conn: conn} do
+      token = insert(:token, type: "ERC-721")
+
+      insert(:token_instance,
+        token_id: 0,
+        token_contract_address_hash: token.contract_address_hash,
+        metadata: %{"awesome" => "metadata"}
+      )
+
+      encoded_url_1 =
+        "0x" <>
+          (ABI.TypeEncoder.encode(["http://240.0.0.0/api/metadata.json"], %ABI.FunctionSelector{
+             function: nil,
+             types: [
+               :string
+             ]
+           })
+           |> Base.encode16(case: :lower))
+
+      token_contract_address_hash_string = to_string(token.contract_address_hash)
+
+      expect(
+        EthereumJSONRPC.Mox,
+        :json_rpc,
+        fn [
+             %{
+               id: id_1,
+               jsonrpc: "2.0",
+               method: "eth_call",
+               params: [
+                 %{
+                   data: "0xc87b56dd0000000000000000000000000000000000000000000000000000000000000000",
+                   to: ^token_contract_address_hash_string
+                 },
+                 "latest"
+               ]
+             }
+           ],
+           _options ->
+          {:ok, [%{id: id_1, jsonrpc: "2.0", result: encoded_url_1}]}
+        end
+      )
+
+      request = get(conn, "/api/v2/tokens/#{token.contract_address.hash}/instances/0")
+
+      assert data = json_response(request, 200)
+      assert data["metadata"] == nil
+
+      instance = Repo.one(Instance)
+      assert instance.metadata == nil
+      assert instance.error == "blacklist"
+      assert instance.skip_metadata_url == false
+    end
   end
 
   describe "/tokens/{address_hash}/instances/{token_id}/transfers" do
@@ -1483,6 +1537,7 @@ defmodule BlockScoutWeb.API.V2.TokenControllerTest do
     setup %{json_rpc_named_arguments: json_rpc_named_arguments} do
       old_recaptcha_env = Application.get_env(:block_scout_web, :recaptcha)
       old_http_adapter = Application.get_env(:block_scout_web, :http_adapter)
+      old_explorer_http_adapter = Application.get_env(:explorer, :http_adapter)
 
       v2_secret_key = "v2_secret_key"
       v3_secret_key = "v3_secret_key"
@@ -1507,10 +1562,12 @@ defmodule BlockScoutWeb.API.V2.TokenControllerTest do
       %{json_rpc_named_arguments: mocked_json_rpc_named_arguments}
 
       Subscriber.to(:fetched_token_instance_metadata, :on_demand)
+      Subscriber.to(:not_fetched_token_instance_metadata, :on_demand)
 
       on_exit(fn ->
         Application.put_env(:block_scout_web, :recaptcha, old_recaptcha_env)
         Application.put_env(:block_scout_web, :http_adapter, old_http_adapter)
+        Application.put_env(:explorer, :http_adapter, old_explorer_http_adapter)
       end)
 
       {:ok, %{v2_secret_key: v2_secret_key, v3_secret_key: v3_secret_key}}
@@ -1557,7 +1614,7 @@ defmodule BlockScoutWeb.API.V2.TokenControllerTest do
       topic = "token_instances:#{token_contract_address_hash_string}"
 
       {:ok, _reply, _socket} =
-        BlockScoutWeb.UserSocketV2
+        BlockScoutWeb.V2.UserSocket
         |> socket("no_id", %{})
         |> subscribe_and_join(topic)
 
@@ -1587,8 +1644,6 @@ defmodule BlockScoutWeb.API.V2.TokenControllerTest do
 
       assert(token_instance_from_db)
       assert token_instance_from_db.metadata == metadata
-
-      Application.put_env(:explorer, :http_adapter, HTTPoison)
     end
 
     test "don't fetch token instance metadata for non-existent token instance", %{
@@ -1667,7 +1722,7 @@ defmodule BlockScoutWeb.API.V2.TokenControllerTest do
       topic = "token_instances:#{token_contract_address_hash_string}"
 
       {:ok, _reply, _socket} =
-        BlockScoutWeb.UserSocketV2
+        BlockScoutWeb.V2.UserSocket
         |> socket("no_id", %{})
         |> subscribe_and_join(topic)
 
@@ -1697,8 +1752,356 @@ defmodule BlockScoutWeb.API.V2.TokenControllerTest do
 
       assert(token_instance_from_db)
       assert token_instance_from_db.metadata == metadata
+    end
 
-      Application.put_env(:explorer, :http_adapter, HTTPoison)
+    test "emit not_fetched_token_instance_metadata event when fetching token instance metadata fails", %{
+      conn: conn,
+      v2_secret_key: v2_secret_key
+    } do
+      expected_body = "secret=#{v2_secret_key}&response=123"
+
+      Explorer.Mox.HTTPoison
+      |> expect(:post, fn _url, ^expected_body, _headers, _options ->
+        {:ok,
+         %HTTPoison.Response{
+           status_code: 200,
+           body:
+             Jason.encode!(%{
+               "success" => true,
+               "hostname" => Application.get_env(:block_scout_web, BlockScoutWeb.Endpoint)[:url][:host]
+             })
+         }}
+      end)
+
+      token = insert(:token, type: "ERC-721")
+      token_id = 1
+
+      insert(:token_instance,
+        token_id: token_id,
+        token_contract_address_hash: token.contract_address_hash,
+        metadata: nil
+      )
+
+      url = "http://metadata.endpoint.com"
+      token_contract_address_hash_string = to_string(token.contract_address_hash)
+
+      TestHelper.fetch_token_uri_mock(url, token_contract_address_hash_string)
+
+      Application.put_env(:explorer, :http_adapter, Explorer.Mox.HTTPoison)
+
+      Explorer.Mox.HTTPoison
+      |> expect(:get, fn ^url, _headers, _options ->
+        {:ok, %HTTPoison.Response{status_code: 500, body: "Error"}}
+      end)
+
+      topic = "token_instances:#{token_contract_address_hash_string}"
+
+      {:ok, _reply, _socket} =
+        BlockScoutWeb.V2.UserSocket
+        |> socket("no_id", %{})
+        |> subscribe_and_join(topic)
+
+      request =
+        patch(conn, "/api/v2/tokens/#{token.contract_address.hash}/instances/#{token_id}/refetch-metadata", %{
+          "recaptcha_response" => "123"
+        })
+
+      assert %{"message" => "OK"} = json_response(request, 200)
+
+      :timer.sleep(100)
+
+      assert_receive(
+        {:chain_event, :not_fetched_token_instance_metadata, :on_demand,
+         [^token_contract_address_hash_string, ^token_id, "error"]}
+      )
+
+      assert_receive %Phoenix.Socket.Message{
+                       payload: %{token_id: ^token_id, reason: "error"},
+                       event: "not_fetched_token_instance_metadata",
+                       topic: ^topic
+                     },
+                     :timer.seconds(1)
+
+      token_instance_from_db =
+        Repo.get_by(Instance, token_id: token_id, token_contract_address_hash: token.contract_address_hash)
+
+      assert(token_instance_from_db)
+      assert is_nil(token_instance_from_db.metadata)
+    end
+
+    test "fetch token instance metadata using scoped bypass api key", %{conn: conn} do
+      # Configure scoped bypass api key for this test
+      old_recaptcha_env = Application.get_env(:block_scout_web, :recaptcha)
+      scoped_bypass_token = "test_scoped_token_123"
+
+      Application.put_env(
+        :block_scout_web,
+        :recaptcha,
+        Keyword.merge(old_recaptcha_env,
+          scoped_bypass_tokens: [
+            token_instance_refetch_metadata: scoped_bypass_token
+          ]
+        )
+      )
+
+      Application.put_env(:explorer, :http_adapter, Explorer.Mox.HTTPoison)
+
+      on_exit(fn ->
+        Application.put_env(:block_scout_web, :recaptcha, old_recaptcha_env)
+        Application.put_env(:explorer, :http_adapter, HTTPoison)
+      end)
+
+      token = insert(:token, type: "ERC-721")
+      token_id = 1
+
+      insert(:token_instance,
+        token_id: token_id,
+        token_contract_address_hash: token.contract_address_hash,
+        metadata: %{}
+      )
+
+      metadata = %{"name" => "Super Token"}
+      url = "http://metadata.endpoint.com"
+      token_contract_address_hash_string = to_string(token.contract_address_hash)
+
+      TestHelper.fetch_token_uri_mock(url, token_contract_address_hash_string)
+
+      Explorer.Mox.HTTPoison
+      |> expect(:get, fn ^url, _headers, _options ->
+        {:ok, %HTTPoison.Response{status_code: 200, body: Jason.encode!(metadata)}}
+      end)
+
+      topic = "token_instances:#{token_contract_address_hash_string}"
+
+      {:ok, _reply, _socket} =
+        BlockScoutWeb.V2.UserSocket
+        |> socket("no_id", %{})
+        |> subscribe_and_join(topic)
+
+      request =
+        patch(conn, "/api/v2/tokens/#{token.contract_address.hash}/instances/#{token_id}/refetch-metadata", %{
+          "scoped_recaptcha_bypass_token" => scoped_bypass_token
+        })
+
+      assert %{"message" => "OK"} = json_response(request, 200)
+
+      :timer.sleep(100)
+
+      assert_receive(
+        {:chain_event, :fetched_token_instance_metadata, :on_demand,
+         [^token_contract_address_hash_string, ^token_id, ^metadata]}
+      )
+
+      assert_receive %Phoenix.Socket.Message{
+                       payload: %{token_id: ^token_id, fetched_metadata: ^metadata},
+                       event: "fetched_token_instance_metadata",
+                       topic: ^topic
+                     },
+                     :timer.seconds(1)
+
+      token_instance_from_db =
+        Repo.get_by(Instance, token_id: token_id, token_contract_address_hash: token.contract_address_hash)
+
+      assert(token_instance_from_db)
+      assert token_instance_from_db.metadata == metadata
+    end
+
+    test "falls back to normal reCAPTCHA when incorrect scoped bypass api key is supplied", %{
+      conn: conn,
+      v2_secret_key: v2_secret_key
+    } do
+      # Configure scoped bypass api key for this test
+      old_recaptcha_env = Application.get_env(:block_scout_web, :recaptcha)
+      scoped_bypass_token = "test_scoped_token_123"
+
+      Application.put_env(
+        :block_scout_web,
+        :recaptcha,
+        Keyword.merge(old_recaptcha_env,
+          scoped_bypass_tokens: [
+            token_instance_refetch_metadata: scoped_bypass_token
+          ]
+        )
+      )
+
+      Application.put_env(:explorer, :http_adapter, Explorer.Mox.HTTPoison)
+
+      on_exit(fn ->
+        Application.put_env(:block_scout_web, :recaptcha, old_recaptcha_env)
+        Application.put_env(:explorer, :http_adapter, HTTPoison)
+      end)
+
+      token = insert(:token, type: "ERC-721")
+      token_id = 1
+
+      insert(:token_instance,
+        token_id: token_id,
+        token_contract_address_hash: token.contract_address_hash,
+        metadata: %{}
+      )
+
+      metadata = %{"name" => "Super Token"}
+      url = "http://metadata.endpoint.com"
+      token_contract_address_hash_string = to_string(token.contract_address_hash)
+
+      TestHelper.fetch_token_uri_mock(url, token_contract_address_hash_string)
+
+      # First request with wrong scoped token - should fail
+      request =
+        patch(conn, "/api/v2/tokens/#{token.contract_address.hash}/instances/#{token_id}/refetch-metadata", %{
+          "scoped_recaptcha_bypass_token" => "wrong_scoped_token"
+        })
+
+      assert %{"message" => "Invalid reCAPTCHA response"} = json_response(request, 403)
+
+      # Set up normal reCAPTCHA validation for the second request
+      expected_body = "secret=#{v2_secret_key}&response=correct_recaptcha_token"
+
+      Explorer.Mox.HTTPoison
+      |> expect(:post, fn _url, ^expected_body, _headers, _options ->
+        {:ok,
+         %HTTPoison.Response{
+           status_code: 200,
+           body:
+             Jason.encode!(%{
+               "success" => true,
+               "hostname" => Application.get_env(:block_scout_web, BlockScoutWeb.Endpoint)[:url][:host]
+             })
+         }}
+      end)
+
+      Explorer.Mox.HTTPoison
+      |> expect(:get, fn ^url, _headers, _options ->
+        {:ok, %HTTPoison.Response{status_code: 200, body: Jason.encode!(metadata)}}
+      end)
+
+      topic = "token_instances:#{token_contract_address_hash_string}"
+
+      {:ok, _reply, _socket} =
+        BlockScoutWeb.V2.UserSocket
+        |> socket("no_id", %{})
+        |> subscribe_and_join(topic)
+
+      # Second request with correct reCAPTCHA token - should work
+      request =
+        patch(conn, "/api/v2/tokens/#{token.contract_address.hash}/instances/#{token_id}/refetch-metadata", %{
+          "recaptcha_response" => "correct_recaptcha_token"
+        })
+
+      assert %{"message" => "OK"} = json_response(request, 200)
+
+      :timer.sleep(100)
+
+      assert_receive(
+        {:chain_event, :fetched_token_instance_metadata, :on_demand,
+         [^token_contract_address_hash_string, ^token_id, ^metadata]}
+      )
+
+      token_instance_from_db =
+        Repo.get_by(Instance, token_id: token_id, token_contract_address_hash: token.contract_address_hash)
+
+      assert(token_instance_from_db)
+      assert token_instance_from_db.metadata == metadata
+    end
+
+    test "rejects scoped bypass api key when scoped tokens are not configured", %{
+      conn: conn,
+      v2_secret_key: v2_secret_key
+    } do
+      # Make sure we don't have scoped tokens configured
+      old_recaptcha_env = Application.get_env(:block_scout_web, :recaptcha)
+
+      # Ensure there are no scoped_bypass_tokens in the configuration
+      Application.put_env(
+        :block_scout_web,
+        :recaptcha,
+        Keyword.merge(old_recaptcha_env,
+          scoped_bypass_tokens: [
+            token_instance_refetch_metadata: nil
+          ]
+        )
+      )
+
+      Application.put_env(:explorer, :http_adapter, Explorer.Mox.HTTPoison)
+
+      on_exit(fn ->
+        Application.put_env(:block_scout_web, :recaptcha, old_recaptcha_env)
+        Application.put_env(:explorer, :http_adapter, HTTPoison)
+      end)
+
+      token = insert(:token, type: "ERC-721")
+      token_id = 1
+
+      insert(:token_instance,
+        token_id: token_id,
+        token_contract_address_hash: token.contract_address_hash,
+        metadata: %{}
+      )
+
+      metadata = %{"name" => "Super Token"}
+      url = "http://metadata.endpoint.com"
+      token_contract_address_hash_string = to_string(token.contract_address_hash)
+
+      # First request with a scoped token that isn't configured - should fail
+      request =
+        patch(conn, "/api/v2/tokens/#{token.contract_address.hash}/instances/#{token_id}/refetch-metadata", %{
+          "scoped_recaptcha_bypass_token" => "some_token_that_does_not_exist"
+        })
+
+      assert %{"message" => "Invalid reCAPTCHA response"} = json_response(request, 403)
+
+      request =
+        patch(conn, "/api/v2/tokens/#{token.contract_address.hash}/instances/#{token_id}/refetch-metadata", %{
+          "scoped_recaptcha_bypass_token" => ""
+        })
+
+      assert %{"message" => "Invalid reCAPTCHA response"} = json_response(request, 403)
+
+      request =
+        patch(conn, "/api/v2/tokens/#{token.contract_address.hash}/instances/#{token_id}/refetch-metadata", %{
+          "scoped_recaptcha_bypass_token" => nil
+        })
+
+      assert %{"message" => "Invalid reCAPTCHA response"} = json_response(request, 403)
+
+      # Set up normal reCAPTCHA validation for the second request
+      expected_body = "secret=#{v2_secret_key}&response=correct_recaptcha_token"
+
+      Explorer.Mox.HTTPoison
+      |> expect(:post, fn _url, ^expected_body, _headers, _options ->
+        {:ok,
+         %HTTPoison.Response{
+           status_code: 200,
+           body:
+             Jason.encode!(%{
+               "success" => true,
+               "hostname" => Application.get_env(:block_scout_web, BlockScoutWeb.Endpoint)[:url][:host]
+             })
+         }}
+      end)
+
+      TestHelper.fetch_token_uri_mock(url, token_contract_address_hash_string)
+
+      Explorer.Mox.HTTPoison
+      |> expect(:get, fn ^url, _headers, _options ->
+        {:ok, %HTTPoison.Response{status_code: 200, body: Jason.encode!(metadata)}}
+      end)
+
+      # Second request with correct reCAPTCHA token - should work
+      request =
+        patch(conn, "/api/v2/tokens/#{token.contract_address.hash}/instances/#{token_id}/refetch-metadata", %{
+          "recaptcha_response" => "correct_recaptcha_token"
+        })
+
+      assert %{"message" => "OK"} = json_response(request, 200)
+
+      :timer.sleep(100)
+
+      token_instance_from_db =
+        Repo.get_by(Instance, token_id: token_id, token_contract_address_hash: token.contract_address.hash)
+
+      assert(token_instance_from_db)
+      assert token_instance_from_db.metadata == metadata
     end
   end
 

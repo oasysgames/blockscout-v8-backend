@@ -88,7 +88,6 @@ defmodule Explorer.Chain.Log do
   alias ABI.{Event, FunctionSelector}
   alias Explorer.{Chain, Repo}
   alias Explorer.Chain.{ContractMethod, Hash, Log, TokenTransfer, Transaction}
-  alias Explorer.Chain.SmartContract.Proxy
   alias Explorer.SmartContract.SigProviderInterface
 
   @required_attrs ~w(address_hash data block_hash index)a
@@ -167,18 +166,25 @@ defmodule Explorer.Chain.Log do
   @doc """
   Decode transaction log data.
   """
-  @spec decode(Log.t(), Transaction.t(), any(), boolean(), boolean(), map(), map()) ::
+  @spec decode(Log.t(), Transaction.t(), any(), boolean(), boolean(), list(), map()) ::
           {{:ok, String.t(), String.t(), map()}
            | {:error, :could_not_decode}
            | {:error, atom(), list()}
-           | {{:error, :contract_not_verified | :try_with_sig_provider, [any()]}, any()}, map(), map()}
-  def decode(log, transaction, options, skip_sig_provider?, from_list?, contracts_acc \\ %{}, events_acc \\ %{}) do
-    with {full_abi, contracts_acc} <- check_cache(contracts_acc, log.address_hash, options),
-         {:no_abi, false} <- {:no_abi, is_nil(full_abi)},
+           | {{:error, :contract_not_verified | :try_with_sig_provider, [any()]}, any()}, map()}
+  def decode(
+        log,
+        transaction,
+        db_options,
+        skip_sig_provider?,
+        decoding_from_list?,
+        full_abi,
+        events_acc \\ %{}
+      ) do
+    with {:no_abi, false} <- {:no_abi, is_nil(full_abi)},
          {:ok, selector, mapping} <- find_and_decode(full_abi, log, transaction.hash),
          identifier <- Base.encode16(selector.method_id, case: :lower),
          text <- function_call(selector.function, mapping) do
-      {{:ok, identifier, text, mapping}, contracts_acc, events_acc}
+      {{:ok, identifier, text, mapping}, events_acc}
     else
       {:error, _} = error ->
         handle_method_decode_error(
@@ -186,9 +192,8 @@ defmodule Explorer.Chain.Log do
           log,
           transaction,
           skip_sig_provider?,
-          from_list?,
-          options,
-          contracts_acc,
+          decoding_from_list?,
+          db_options,
           events_acc
         )
 
@@ -198,9 +203,8 @@ defmodule Explorer.Chain.Log do
           log,
           transaction,
           skip_sig_provider?,
-          from_list?,
-          options,
-          contracts_acc,
+          decoding_from_list?,
+          db_options,
           events_acc
         )
     end
@@ -211,52 +215,28 @@ defmodule Explorer.Chain.Log do
          log,
          transaction,
          skip_sig_provider?,
-         from_list?,
-         options,
-         contracts_acc,
+         decoding_from_list?,
+         db_options,
          events_acc
        ) do
     case error do
       {:error, _reason} ->
         with {{:error, :contract_not_verified, candidates}, events_acc} <-
-               find_method_candidates(log, transaction, options, events_acc),
+               find_method_candidates(log, transaction, db_options, events_acc),
              {true, events_acc} <- {is_list(candidates), events_acc},
              {false, events_acc} <- {Enum.empty?(candidates), events_acc} do
-          {{:error, :contract_not_verified, candidates}, contracts_acc, events_acc}
+          {{:error, :contract_not_verified, candidates}, events_acc}
         else
           {_, events_acc} ->
             result =
-              if from_list? do
+              if decoding_from_list? do
                 mark_events_to_decode_later_via_sig_provider_in_batch(log, transaction.hash)
               else
                 decode_event_via_sig_provider(log, transaction.hash, skip_sig_provider?)
               end
 
-            {result, contracts_acc, events_acc}
+            {result, events_acc}
         end
-    end
-  end
-
-  defp check_cache(acc, address_hash, options) do
-    address_options =
-      [
-        necessity_by_association: %{
-          :smart_contract => :optional
-        }
-      ]
-      |> Keyword.merge(options)
-
-    if !is_nil(address_hash) && Map.has_key?(acc, address_hash) do
-      {acc[address_hash], acc}
-    else
-      case Chain.find_contract_address(address_hash, address_options, false) do
-        {:ok, %{smart_contract: smart_contract}} ->
-          full_abi = Proxy.combine_proxy_implementation_abi(smart_contract, options)
-          {full_abi, Map.put(acc, address_hash, full_abi)}
-
-        _ ->
-          {nil, Map.put(acc, address_hash, nil)}
-      end
     end
   end
 
@@ -553,18 +533,54 @@ defmodule Explorer.Chain.Log do
   def stream_unfetched_weth_token_transfers(each_fun) do
     env = Application.get_env(:explorer, Explorer.Chain.TokenTransfer)
 
-    __MODULE__
+    base_query = from(log in __MODULE__, as: :log)
+
+    base_query
     |> where([log], log.address_hash in ^env[:whitelisted_weth_contracts])
-    |> where(
-      [log],
-      log.first_topic == ^TokenTransfer.weth_deposit_signature() or
-        log.first_topic == ^TokenTransfer.weth_withdrawal_signature()
-    )
+    |> where(^first_topic_is_deposit_or_withdrawal_signature())
     |> join(:left, [log], tt in TokenTransfer,
       on: log.block_hash == tt.block_hash and log.transaction_hash == tt.transaction_hash and log.index == tt.log_index
     )
     |> where([log, tt], is_nil(tt.transaction_hash))
     |> select([log], log)
     |> Repo.stream_each(each_fun)
+  end
+
+  @doc """
+  Generates a dynamic query condition to check if the `first_topic` of a log entry
+  matches either the WETH deposit or withdrawal signature.
+
+  This function is typically used to filter logs where the first topic corresponds
+  to specific token transfer events, such as WETH deposits or withdrawals.
+
+  ## Returns
+
+  - An `Ecto.Query.dynamic()` expression that can be used in Ecto queries.
+  """
+  @spec first_topic_is_deposit_or_withdrawal_signature() :: Ecto.Query.dynamic_expr()
+  def first_topic_is_deposit_or_withdrawal_signature do
+    dynamic(
+      [log: log],
+      log.first_topic in [^TokenTransfer.weth_deposit_signature(), ^TokenTransfer.weth_withdrawal_signature()]
+    )
+  end
+
+  @doc """
+  Generates a dynamic query condition to filter logs where the `first_topic`
+  is neither the WETH deposit signature nor the WETH withdrawal signature.
+
+  This function is useful for excluding specific types of token transfer events
+  from query results.
+
+  ## Returns
+
+  - An `Ecto.Query.dynamic/1` expression that can be used in Ecto queries.
+  """
+  @spec first_topic_is_not_deposit_or_withdrawal_signature() :: Ecto.Query.dynamic_expr()
+  def first_topic_is_not_deposit_or_withdrawal_signature do
+    dynamic(
+      [log: log],
+      log.first_topic not in [^TokenTransfer.weth_deposit_signature(), ^TokenTransfer.weth_withdrawal_signature()]
+    )
   end
 end

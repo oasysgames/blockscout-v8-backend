@@ -2,7 +2,7 @@ defmodule BlockScoutWeb.API.V2.ValidatorController do
   use BlockScoutWeb, :controller
 
   alias Explorer.Chain.Blackfort.Validator, as: ValidatorBlackfort
-  alias Explorer.Chain.Cache.{BlackfortValidatorsCounters, StabilityValidatorsCounters}
+  alias Explorer.Chain.Cache.Counters.{Blackfort, Stability}
   alias Explorer.Chain.Stability.Validator, as: ValidatorStability
 
   import BlockScoutWeb.PagingHelper,
@@ -61,12 +61,18 @@ defmodule BlockScoutWeb.API.V2.ValidatorController do
       validators_counter: validators_counter,
       new_validators_counter: new_validators_counter,
       active_validators_counter: active_validators_counter
-    } = StabilityValidatorsCounters.get_counters(@api_true)
+    } = Stability.ValidatorsCount.get_counters(@api_true)
 
     conn
     |> json(%{
+      validators_count: validators_counter,
+      # todo: It should be removed in favour `validators_count` property with the next release after 8.0.0
       validators_counter: validators_counter,
+      new_validators_count_24h: new_validators_counter,
+      # todo: It should be removed in favour `new_validators_count_24h` property with the next release after 8.0.0
       new_validators_counter_24h: new_validators_counter,
+      active_validators_count: active_validators_counter,
+      # todo: It should be removed in favour `active_validators_count` property with the next release after 8.0.0
       active_validators_counter: active_validators_counter,
       active_validators_percentage:
         calculate_active_validators_percentage(active_validators_counter, validators_counter)
@@ -110,11 +116,15 @@ defmodule BlockScoutWeb.API.V2.ValidatorController do
     %{
       validators_counter: validators_counter,
       new_validators_counter: new_validators_counter
-    } = BlackfortValidatorsCounters.get_counters(@api_true)
+    } = Blackfort.ValidatorsCount.get_counters(@api_true)
 
     conn
     |> json(%{
+      validators_count: validators_counter,
+      # todo: It should be removed in favour `validators_count` property with the next release after 8.0.0
       validators_counter: validators_counter,
+      new_validators_count_24h: new_validators_counter,
+      # todo: It should be removed in favour `new_validators_count_24h` property with the next release after 8.0.0
       new_validators_counter_24h: new_validators_counter
     })
   end

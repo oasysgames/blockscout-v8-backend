@@ -28,7 +28,7 @@ services:
       service: backend
     links:
       - db:database
-    image: blockscout-backend:v7.0.2
+    image: blockscout-backend:v8.1.1
     build:
       context: ..
       dockerfile: ./docker/Dockerfile
@@ -40,7 +40,7 @@ services:
         CACHE_TOTAL_GAS_USAGE_COUNTER_ENABLED: ""
         CACHE_ADDRESS_WITH_BALANCES_UPDATE_INTERVAL: ""
         ADMIN_PANEL_ENABLED: ""
-        RELEASE_VERSION: 7.0.2
+        RELEASE_VERSION: 8.1.1
 
   visualizer:
     extends:

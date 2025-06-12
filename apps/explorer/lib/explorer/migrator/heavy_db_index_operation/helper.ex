@@ -106,9 +106,9 @@ defmodule Explorer.Migrator.HeavyDbIndexOperation.Helper do
   Creates DB index with the given name and table name atom, if it doesn't exist.
   """
   @spec create_db_index(String.t(), atom(), list()) :: :ok | :error
-  def create_db_index(raw_index_name, table_name_atom, table_columns) do
+  def create_db_index(raw_index_name, table_name_atom, table_columns, unique? \\ false) do
     index_name = sanitize_index_name(raw_index_name)
-    query = create_index_query_string(index_name, table_name_atom, table_columns)
+    query = create_index_query_string(index_name, table_name_atom, table_columns, unique?)
     run_create_db_index_query(query)
   end
 
@@ -153,9 +153,9 @@ defmodule Explorer.Migrator.HeavyDbIndexOperation.Helper do
       "CREATE INDEX CONCURRENTLY IF NOT EXISTS \"my_index\" on my_table (column1, column2);"
 
   """
-  @spec create_index_query_string(String.t(), atom(), list()) :: String.t()
-  def create_index_query_string(index_name, table_name_atom, table_columns) do
-    "CREATE INDEX #{add_concurrently_flag?()} IF NOT EXISTS \"#{index_name}\" on #{to_string(table_name_atom)} (#{Enum.join(table_columns, ", ")});"
+  @spec create_index_query_string(String.t(), atom(), list(), boolean()) :: String.t()
+  def create_index_query_string(index_name, table_name_atom, table_columns, unique? \\ false) do
+    "CREATE #{(unique? && "UNIQUE") || ""} INDEX #{add_concurrently_flag?()} IF NOT EXISTS \"#{index_name}\" on #{to_string(table_name_atom)} (#{Enum.join(table_columns, ", ")});"
   end
 
   @doc """
@@ -232,5 +232,21 @@ defmodule Explorer.Migrator.HeavyDbIndexOperation.Helper do
       <<index_name::binary-size(63), _::binary>> = raw_index_name
       index_name
     end
+  end
+
+  @doc """
+    Returns the configured check interval for heavy DB operations.
+    If not configured, defaults to 10 minutes.
+
+    ## Examples
+
+        iex> get_check_interval()
+        600_000 # 10 minutes in milliseconds
+
+  """
+  @spec get_check_interval() :: timeout()
+  def get_check_interval do
+    Application.get_env(:explorer, Explorer.Migrator.HeavyDbIndexOperation)[:check_interval] ||
+      :timer.minutes(10)
   end
 end

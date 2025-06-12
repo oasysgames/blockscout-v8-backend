@@ -11,6 +11,7 @@ defmodule Indexer.Block.FetcherTest do
   alias Indexer.Block.Fetcher
   alias Indexer.BufferedTask
   alias Indexer.Fetcher.CoinBalance.Catchup, as: CoinBalanceCatchup
+  alias Indexer.Fetcher.OnDemand.ContractCreator, as: ContractCreatorOnDemand
 
   alias Indexer.Fetcher.{
     ContractCode,
@@ -66,6 +67,7 @@ defmodule Indexer.Block.FetcherTest do
       Token.Supervisor.Case.start_supervised!(json_rpc_named_arguments: json_rpc_named_arguments)
       TokenBalance.Supervisor.Case.start_supervised!(json_rpc_named_arguments: json_rpc_named_arguments)
       ReplacedTransaction.Supervisor.Case.start_supervised!()
+      {:ok, _pid} = ContractCreatorOnDemand.start_link([[], []])
 
       UncleBlock.Supervisor.Case.start_supervised!(
         block_fetcher: %Fetcher{json_rpc_named_arguments: json_rpc_named_arguments}
@@ -673,7 +675,7 @@ defmodule Indexer.Block.FetcherTest do
 
           assert Repo.aggregate(Chain.Block, :count, :hash) == 1
           assert Repo.aggregate(Address, :count, :hash) == 2
-          assert Chain.log_count() == 1
+          assert Repo.aggregate(Log, :count) == 1
           assert Repo.aggregate(Transaction, :count, :hash) == 1
 
           first_address = Repo.get!(Address, first_address_hash)
@@ -805,6 +807,7 @@ defmodule Indexer.Block.FetcherTest do
         Token.Supervisor.Case.start_supervised!(json_rpc_named_arguments: json_rpc_named_arguments)
         TokenBalance.Supervisor.Case.start_supervised!(json_rpc_named_arguments: json_rpc_named_arguments)
         ReplacedTransaction.Supervisor.Case.start_supervised!()
+        {:ok, _pid} = ContractCreatorOnDemand.start_link([[], []])
 
         UncleBlock.Supervisor.Case.start_supervised!(
           block_fetcher: %Fetcher{json_rpc_named_arguments: json_rpc_named_arguments}
@@ -1163,7 +1166,7 @@ defmodule Indexer.Block.FetcherTest do
 
             assert Repo.aggregate(Chain.Block, :count, :hash) == 1
             assert Repo.aggregate(Address, :count, :hash) == 2
-            assert Chain.log_count() == 1
+            assert Repo.aggregate(Log, :count) == 1
             assert Repo.aggregate(Transaction, :count, :hash) == 1
 
             first_address = Repo.get!(Address, first_address_hash)

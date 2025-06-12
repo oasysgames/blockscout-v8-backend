@@ -6,7 +6,10 @@ defmodule BlockScoutWeb.AddressTransactionController do
   use BlockScoutWeb, :controller
 
   import BlockScoutWeb.Account.AuthController, only: [current_user: 1]
-  import BlockScoutWeb.Chain, only: [current_filter: 1, paging_options: 1, next_page_params: 3, split_list_by_page: 1]
+
+  import BlockScoutWeb.Chain,
+    only: [current_filter: 1, paging_options: 1, next_page_params: 3, split_list_by_page: 1]
+
   import BlockScoutWeb.Models.GetAddressTags, only: [get_address_tags: 2]
   import Explorer.Chain.SmartContract, only: [burn_address_hash_string: 0]
 
@@ -50,7 +53,7 @@ defmodule BlockScoutWeb.AddressTransactionController do
     address_options = [necessity_by_association: %{:names => :optional, :smart_contract => :optional}]
 
     with {:ok, address_hash} <- Chain.string_to_address_hash(address_hash_string),
-         {:ok, address} <- Chain.hash_to_address(address_hash, address_options, false),
+         {:ok, address} <- Chain.hash_to_address(address_hash, address_options),
          {:ok, false} <- AccessHelper.restricted_access?(address_hash_string, params) do
       options =
         @transaction_necessity_by_association
@@ -119,6 +122,8 @@ defmodule BlockScoutWeb.AddressTransactionController do
   end
 
   def index(conn, %{"address_id" => address_hash_string} = params) do
+    ip = AccessHelper.conn_to_ip_string(conn)
+
     with {:ok, address_hash} <- Chain.string_to_address_hash(address_hash_string),
          {:ok, address} <- Chain.hash_to_address(address_hash),
          {:ok, false} <- AccessHelper.restricted_access?(address_hash_string, params) do
@@ -126,7 +131,7 @@ defmodule BlockScoutWeb.AddressTransactionController do
         conn,
         "index.html",
         address: address,
-        coin_balance_status: CoinBalanceOnDemand.trigger_fetch(address),
+        coin_balance_status: CoinBalanceOnDemand.trigger_fetch(ip, address),
         exchange_rate: Market.get_coin_exchange_rate(),
         filter: params["filter"],
         counters_path: address_path(conn, :address_counters, %{"id" => address_hash_string}),
@@ -156,7 +161,7 @@ defmodule BlockScoutWeb.AddressTransactionController do
               conn,
               "index.html",
               address: address,
-              coin_balance_status: nil,
+              coin_balance_status: CoinBalanceOnDemand.trigger_fetch(ip, address),
               exchange_rate: Market.get_coin_exchange_rate(),
               filter: params["filter"],
               counters_path: address_path(conn, :address_counters, %{"id" => address_hash_string}),

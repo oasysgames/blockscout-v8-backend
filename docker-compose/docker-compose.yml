@@ -26,12 +26,12 @@ services:
     extends:
       file: ./services/backend.yml
       service: backend
-    image: blockscout-backend:v7.0.2
+    image: blockscout-backend:v8.1.1
     build:
       context: ..
       dockerfile: ./docker/Dockerfile
       args:
-        RELEASE_VERSION: 7.0.2
+        RELEASE_VERSION: 8.1.1
     links:
       - db:database
     # environment:
@@ -50,7 +50,7 @@ services:
       context: ..
       dockerfile: ./docker/Dockerfile
       args:
-        RELEASE_VERSION: 7.0.2
+        RELEASE_VERSION: 8.1.1
 
   visualizer:
     extends:

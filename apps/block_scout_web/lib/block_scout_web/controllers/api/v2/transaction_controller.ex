@@ -11,7 +11,8 @@ defmodule BlockScoutWeb.API.V2.TransactionController do
       put_key_value_to_paging_options: 3,
       token_transfers_next_page_params: 3,
       paging_options: 1,
-      split_list_by_page: 1
+      split_list_by_page: 1,
+      fetch_scam_token_toggle: 2
     ]
 
   import BlockScoutWeb.PagingHelper,
@@ -42,13 +43,13 @@ defmodule BlockScoutWeb.API.V2.TransactionController do
   alias Explorer.{Chain, PagingOptions, Repo}
   alias Explorer.Chain.Arbitrum.Reader.API.Settlement, as: ArbitrumSettlementReader
   alias Explorer.Chain.Beacon.Reader, as: BeaconReader
+  alias Explorer.Chain.Cache.Counters.{NewPendingTransactionsCount, Transactions24hCount}
   alias Explorer.Chain.{Hash, InternalTransaction, Transaction}
   alias Explorer.Chain.Optimism.TransactionBatch, as: OptimismTransactionBatch
   alias Explorer.Chain.PolygonZkevm.Reader, as: PolygonZkevmReader
   alias Explorer.Chain.Scroll.Reader, as: ScrollReader
   alias Explorer.Chain.Token.Instance
   alias Explorer.Chain.ZkSync.Reader, as: ZkSyncReader
-  alias Explorer.Counters.{FreshPendingTransactionsCounter, Transactions24hStats}
   alias Indexer.Fetcher.OnDemand.FirstTrace, as: FirstTraceOnDemand
   alias Indexer.Fetcher.OnDemand.NeonSolanaTransactions, as: NeonSolanaTransactions
 
@@ -174,8 +175,7 @@ defmodule BlockScoutWeb.API.V2.TransactionController do
            Chain.preload_token_transfers(
              transaction,
              @token_transfers_in_transaction_necessity_by_association,
-             @api_true,
-             false
+             @api_true |> fetch_scam_token_toggle(conn)
            ) do
       conn
       |> put_status(200)
@@ -269,7 +269,7 @@ defmodule BlockScoutWeb.API.V2.TransactionController do
   """
   @spec external_transactions(Plug.Conn.t(), %{required(String.t()) => String.t()}) :: Plug.Conn.t()
   def external_transactions(conn, %{"transaction_hash_param" => transaction_hash} = _params) do
-    with {:format, {:ok, hash}} <- {:format, Chain.string_to_transaction_hash(transaction_hash)} do
+    with {:format, {:ok, hash}} <- {:format, Chain.string_to_full_hash(transaction_hash)} do
       case NeonSolanaTransactions.maybe_fetch(hash) do
         {:ok, linked_transactions} ->
           conn
@@ -477,6 +477,7 @@ defmodule BlockScoutWeb.API.V2.TransactionController do
         |> Keyword.merge(paging_options)
         |> Keyword.merge(token_transfers_types_options(params))
         |> Keyword.merge(@api_true)
+        |> fetch_scam_token_toggle(conn)
 
       results =
         transaction_hash
@@ -538,7 +539,7 @@ defmodule BlockScoutWeb.API.V2.TransactionController do
       full_options =
         [
           necessity_by_association: %{
-            [address: [:names, :smart_contract, proxy_implementations_association()]] => :optional
+            [address: [:names, :smart_contract, proxy_implementations_smart_contracts_association()]] => :optional
           }
         ]
         |> Keyword.merge(paging_options(params))
@@ -569,7 +570,13 @@ defmodule BlockScoutWeb.API.V2.TransactionController do
   def state_changes(conn, %{"transaction_hash_param" => transaction_hash_string} = params) do
     with {:ok, transaction, _transaction_hash} <- validate_transaction(transaction_hash_string, params) do
       state_changes_plus_next_page =
-        transaction |> TransactionStateHelper.state_changes(params |> paging_options() |> Keyword.merge(@api_true))
+        transaction
+        |> TransactionStateHelper.state_changes(
+          params
+          |> paging_options()
+          |> Keyword.merge(@api_true)
+          |> Keyword.put(:ip, AccessHelper.conn_to_ip_string(conn))
+        )
 
       {state_changes, next_page} = split_list_by_page(state_changes_plus_next_page)
 
@@ -683,10 +690,10 @@ defmodule BlockScoutWeb.API.V2.TransactionController do
   end
 
   def stats(conn, _params) do
-    transactions_count = Transactions24hStats.fetch_count(@api_true)
-    pending_transactions_count = FreshPendingTransactionsCounter.fetch(@api_true)
-    transaction_fees_sum = Transactions24hStats.fetch_fee_sum(@api_true)
-    transaction_fees_avg = Transactions24hStats.fetch_fee_average(@api_true)
+    transactions_count = Transactions24hCount.fetch_count(@api_true)
+    pending_transactions_count = NewPendingTransactionsCount.fetch(@api_true)
+    transaction_fees_sum = Transactions24hCount.fetch_fee_sum(@api_true)
+    transaction_fees_avg = Transactions24hCount.fetch_fee_average(@api_true)
 
     conn
     |> put_status(200)
@@ -710,7 +717,7 @@ defmodule BlockScoutWeb.API.V2.TransactionController do
           | {:restricted_access, true}
           | {:ok, Transaction.t(), Hash.t()}
   def validate_transaction(transaction_hash_string, params, options \\ @api_true) do
-    with {:format, {:ok, transaction_hash}} <- {:format, Chain.string_to_transaction_hash(transaction_hash_string)},
+    with {:format, {:ok, transaction_hash}} <- {:format, Chain.string_to_full_hash(transaction_hash_string)},
          {:not_found, {:ok, transaction}} <-
            {:not_found, Chain.hash_to_transaction(transaction_hash, options)},
          {:ok, false} <- AccessHelper.restricted_access?(to_string(transaction.from_address_hash), params),

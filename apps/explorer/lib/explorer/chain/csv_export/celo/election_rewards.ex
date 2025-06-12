@@ -7,12 +7,12 @@ defmodule Explorer.Chain.CsvExport.Address.Celo.ElectionRewards do
       block_number_to_epoch_number: 1
     ]
 
-  alias Explorer.Chain.Celo.Reader
+  alias Explorer.Chain.Celo.ElectionReward
   alias Explorer.Chain.CsvExport.Helper
   alias Explorer.Chain.{Hash, Wei}
 
-  @spec export(Hash.Address.t(), String.t() | nil, String.t() | nil, any(), any()) :: Enumerable.t()
-  def export(address_hash, from_period, to_period, _filter_type, _filter_value) do
+  @spec export(Hash.Address.t(), String.t() | nil, String.t() | nil, Keyword.t(), any(), any()) :: Enumerable.t()
+  def export(address_hash, from_period, to_period, _options, _filter_type, _filter_value) do
     {from_block, to_block} = Helper.block_from_period(from_period, to_period)
 
     options = [
@@ -22,7 +22,7 @@ defmodule Explorer.Chain.CsvExport.Address.Celo.ElectionRewards do
     ]
 
     address_hash
-    |> Reader.address_hash_to_election_rewards(options)
+    |> ElectionReward.address_hash_to_rewards(options)
     |> to_csv_format()
     |> Helper.dump_to_stream()
   end

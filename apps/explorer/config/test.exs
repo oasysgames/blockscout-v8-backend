@@ -101,8 +101,7 @@ config :logger, :explorer,
   level: :warn,
   path: Path.absname("logs/test/explorer.log")
 
-config :explorer, Explorer.ExchangeRates.Source.TransactionAndLog,
-  secondary_source: Explorer.ExchangeRates.Source.OneCoinSource
-
 config :explorer, Explorer.Chain.Fetcher.CheckBytecodeMatchingOnDemand, enabled: false
 config :explorer, Explorer.Chain.Fetcher.FetchValidatorInfoOnDemand, enabled: false
+
+config :tesla, adapter: Explorer.Mock.TeslaAdapter
