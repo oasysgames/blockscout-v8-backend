@@ -1,0 +1,31 @@
+services:
+  error-scanner:
+    image: alpine:latest
+    container_name: 'error-scanner'
+    restart: unless-stopped
+    volumes:
+      - ../logs:/logs:ro
+      - ../../scripts:/scripts:ro
+      - ~/.aws:/root/.aws:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - S3_ERROR_LOGS_BUCKET=${S3_ERROR_LOGS_BUCKET:-oasys-blockscout-error-logs-bucket}
+      - S3_LOG_PREFIX=${S3_LOG_PREFIX:-blockscout/errors}
+      - AWS_REGION=${AWS_REGION:-ap-northeast-1}
+      - AWS_SKIP_AWS_CHECK=${AWS_SKIP_AWS_CHECK:-false}
+      - SCAN_INTERVAL=${SCAN_INTERVAL:-600}
+      - MAX_LOG_AGE=${MAX_LOG_AGE:-86400}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - SLACK_CHANNEL=${SLACK_CHANNEL:-#alert-oasys}
+      - SLACK_USERNAME=${SLACK_USERNAME:-Error Scanner}
+      - SLACK_ICON_EMOJI=${SLACK_ICON_EMOJI:-:warning:}
+    entrypoint: ["/bin/sh"]
+    command: |
+      -c "
+      apk update &&
+      apk add --no-cache bash jq py3-pip curl docker-cli &&
+      pip3 install awscli --break-system-packages &&
+      /scripts/error-log-scanner.sh daemon
+      "
+    networks:
+      - default
