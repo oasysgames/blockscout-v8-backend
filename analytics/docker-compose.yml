@@ -1,0 +1,40 @@
+version: '3.9'
+
+services:
+  access-log-analyzer:
+    image: alpine:latest
+    container_name: 'access-log-analyzer'
+    restart: unless-stopped
+    # Run once daily at 2AM
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 200M
+        reservations:
+          cpus: '0.05'
+          memory: 100M
+    volumes:
+      - ./scripts:/scripts:ro
+      - ~/.aws:/root/.aws:ro
+    environment:
+      - S3_ACCESS_LOG_BUCKET=${S3_ACCESS_LOG_BUCKET:-l1-mainnet-alb-access-logs-d3rsyke1}
+      - S3_ACCESS_LOG_PREFIX=${S3_ACCESS_LOG_PREFIX:-AWSLogs/428784263071/elasticloadbalancing/ap-northeast-1}
+      - S3_ANALYSIS_PREFIX=${S3_ANALYSIS_PREFIX:-analysis/access-logs}
+      - S3_ERROR_LOGS_BUCKET=${S3_ERROR_LOGS_BUCKET:-oasys-blockscout-error-logs-bucket}
+      - AWS_REGION=${AWS_REGION:-ap-northeast-1}
+      - AWS_SKIP_AWS_CHECK=${AWS_SKIP_AWS_CHECK:-false}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - SLACK_CHANNEL=${SLACK_CHANNEL:-#alert-oasys}
+      - SLACK_USERNAME=${SLACK_USERNAME:-Access Log Analyzer}
+      - SLACK_ICON_EMOJI=${SLACK_ICON_EMOJI:-:bar_chart:}
+    entrypoint: ["/bin/sh"]
+    command: |
+      -c "
+      apk update &&
+      apk add --no-cache bash jq curl gzip &&
+      # Run access log analyzer daily at 2AM
+      /scripts/run-daily-analysis.sh
+      "
+    networks:
+      - default
