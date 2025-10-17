@@ -2086,7 +2086,8 @@ defmodule Explorer.Chain do
     tx_filter =
       case {to_addr_res, from_addr_res} do
         {{:ok, to_addr}, {:ok, from_addr}} ->
-          dynamic([tx], tx.to_address_hash != ^to_addr and tx.from_address_hash != ^from_addr)
+          # Retrieve all OP Node transactions except those where both the to and from addresses are the same.
+          dynamic([tx], tx.to_address_hash != ^to_addr or tx.from_address_hash != ^from_addr)
         _ ->
           true
       end
