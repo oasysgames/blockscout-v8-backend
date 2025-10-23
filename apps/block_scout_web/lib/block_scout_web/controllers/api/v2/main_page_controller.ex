@@ -39,35 +39,18 @@ defmodule BlockScoutWeb.API.V2.MainPageController do
   action_fallback(BlockScoutWeb.API.V2.FallbackController)
 
   def blocks(conn, _params) do
-    # Get the 4 latest blocks that contain at least one transaction which is not a Verse 1 transaction.
-    blocks_with_tx =
-      [paging_options: %PagingOptions{page_size: 4}, api?: true]
+    blocks =
+      [
+        necessity_by_association: %{
+          [miner: [:names, :smart_contract, proxy_implementations_association()]] => :optional,
+          :rewards => :optional,
+          :transactions => :optional
+        },
+        paging_options: %PagingOptions{page_size: 4},
+        api?: true
+      ]
       |> Chain.list_blocks_for_home()
-
-    # Get the latest 25 blocks (ignoring transactions)
-    blocks_latest =
-      [paging_options: %PagingOptions{page_size: 25}, api?: true]
-      |> Chain.list_blocks()
-
-    # Filter the blocks in blocks_latest that have no transactions.
-    blocks_latest_no_tx =
-      blocks_latest
       |> Repo.replica().preload(:transactions)
-      |> Enum.filter(fn block -> Enum.empty?(block.transactions) end)
-
-    # Merge blocks_with_tx with the blocks without transactions, remove duplicates, and get the 4 latest blocks
-    blocks =
-      (blocks_with_tx ++ blocks_latest_no_tx)
-      |> Enum.uniq_by(& &1.number)
-      |> Enum.sort_by(& &1.number, :desc)
-      |> Enum.take(4)
-
-    blocks =
-      Repo.replica().preload(blocks, [
-        [miner: [:names, :smart_contract, proxy_implementations_association()]],
-        :transactions,
-        :rewards
-      ])
 
     conn
     |> put_status(200)
