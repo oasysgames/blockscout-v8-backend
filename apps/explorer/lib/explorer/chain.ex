@@ -2157,21 +2157,31 @@ defmodule Explorer.Chain do
     necessity_by_association = Keyword.get(options, :necessity_by_association, %{})
     paging_options = Keyword.get(options, :paging_options) || @default_paging_options
 
-    to_addr_res = Chain.string_to_address_hash(get_op_node_to_address())
+    # Get the special address to filter out
     from_addr_res = Chain.string_to_address_hash(get_op_node_from_address())
 
+    # Calculate one week ago timestamp
+    one_week_ago = DateTime.utc_now() |> DateTime.add(-7, :day)
+
+    # Build filter condition for from_address
     tx_filter =
-      case {to_addr_res, from_addr_res} do
-        {{:ok, to_addr}, {:ok, from_addr}} ->
-          dynamic([tx], tx.to_address_hash != ^to_addr and tx.from_address_hash != ^from_addr)
+      case from_addr_res do
+        {:ok, from_addr} ->
+          dynamic([tx], tx.from_address_hash != ^from_addr)
         _ ->
           true
       end
 
+    # Query to get block numbers from recent transactions (within last week)
+    # Use block_number for sorting (which correlates with timestamp) to enable single index usage
+    # Note: timestamp filter is placed first to utilize the block_timestamp index
     block_numbers_query =
       from(tx in Transaction,
-        where: not is_nil(tx.block_number) and not is_nil(tx.index),
+        where: tx.block_timestamp >= ^one_week_ago,
+        where: not is_nil(tx.block_timestamp),
         where: ^tx_filter,
+        where: not is_nil(tx.block_number),
+        where: not is_nil(tx.index),
         select: tx.block_number,
         distinct: true,
         order_by: [desc: tx.block_number],
@@ -2180,7 +2190,25 @@ defmodule Explorer.Chain do
 
     block_numbers = Repo.all(block_numbers_query)
 
-    # filter blocks by block_number
+    # Fallback: if no blocks found in last week, query without timestamp filter
+    block_numbers =
+      if Enum.empty?(block_numbers) do
+        fallback_query =
+          from(tx in Transaction,
+            where: not is_nil(tx.block_number) and not is_nil(tx.index),
+            where: ^tx_filter,
+            select: tx.block_number,
+            distinct: true,
+            order_by: [desc: tx.block_number],
+            limit: ^paging_options.page_size
+          )
+
+        Repo.all(fallback_query)
+      else
+        block_numbers
+      end
+
+    # Filter blocks by block_number
     block_query =
       from(block in Block,
         where: block.consensus == true and block.number in ^block_numbers,
@@ -2239,23 +2267,27 @@ defmodule Explorer.Chain do
       %PagingOptions{key: {0, 0}, is_index_in_asc_order: false} ->
         []
       _ ->
+        # Calculate one week ago timestamp for filtering
+        one_week_ago = DateTime.utc_now() |> DateTime.add(-7, :day)
+        
         query =
           paging_options
           |> Transaction.fetch_transactions()
+          # Add timestamp filter first to utilize index
+          |> where([transaction], transaction.block_timestamp >= ^one_week_ago)
+          |> where([transaction], not is_nil(transaction.block_timestamp))
           |> where([transaction], not is_nil(transaction.block_number) and not is_nil(transaction.index))
           |> apply_filter_by_method_id_to_transactions(method_id_filter)
           |> apply_filter_by_type_to_transactions(type_filter)
           |> join_associations(necessity_by_association)
           |> Transaction.put_has_token_transfers_to_transaction(old_ui?)
 
-        # Lọc các transaction không đến/từ các địa chỉ đặc biệt
+        # Filter out transactions from special address
         query =
-          case {Chain.string_to_address_hash(get_op_node_to_address()), Chain.string_to_address_hash(get_op_node_from_address())} do
-            {{:ok, to_address_filter}, {:ok, from_address_filter}} ->
+          case Chain.string_to_address_hash(get_op_node_from_address()) do
+            {:ok, from_address_filter} ->
               query
-              |> where([transaction],
-                transaction.to_address_hash != ^to_address_filter and transaction.from_address_hash != ^from_address_filter
-              )
+              |> where([transaction], transaction.from_address_hash != ^from_address_filter)
             _ ->
               query
           end
