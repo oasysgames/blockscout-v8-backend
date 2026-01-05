@@ -1,0 +1,62 @@
+services:
+  error-scanner:
+    image: alpine:latest
+    container_name: 'error-scanner'
+    restart: unless-stopped
+    
+    # Volumes for logs, scripts, AWS credentials, and notification tracking
+    volumes:
+      # Read-only log directories
+      - ../logs:/logs:ro
+      - ../../scripts:/scripts:ro
+      # AWS credentials (if using IAM roles, this may not be needed)
+      - ~/.aws:/root/.aws:ro
+      # Docker socket for monitoring (optional)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Shared volume for notification tracking (prevents duplicate alerts)
+      - ./notifications:/tmp/notifications:rw
+    
+    # Environment variables
+    # Priority: Environment variables > .env file > Script defaults
+    # Load from .env file first, then allow environment variable overrides
+    env_file:
+      - ../envs/error-scanner.env
+    
+    # Environment variables (can override .env file values)
+    # Format: ${VAR_NAME:-default_value} - uses environment/.env value, falls back to default
+    environment:
+      # S3 Configuration (from .env file or environment, with defaults)
+      - S3_ERROR_LOGS_BUCKET=${S3_ERROR_LOGS_BUCKET:-oasys-blockscout-error-logs-bucket}
+      - S3_LOG_PREFIX=${S3_LOG_PREFIX:-blockscout/errors}
+      - AWS_REGION=${AWS_REGION:-ap-northeast-1}
+      - AWS_SKIP_AWS_CHECK=${AWS_SKIP_AWS_CHECK:-false}
+      
+      # Scanner Configuration (from .env file or environment, with defaults)
+      - SCAN_INTERVAL=${SCAN_INTERVAL:-300}
+      - MAX_LOG_AGE=${MAX_LOG_AGE:-86400}
+      
+      # Slack Configuration (from .env file or environment, with defaults)
+      # Note: env_file values are loaded first, then can be overridden here
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - SLACK_USERNAME=${SLACK_USERNAME:-Error Scanner}
+      - SLACK_ICON_EMOJI=${SLACK_ICON_EMOJI:-:warning:}
+      
+      # Log Directories (defaults, can be overridden)
+      - LOG_DIR=${LOG_DIR:-/logs}
+      - NGINX_LOG_DIR=${NGINX_LOG_DIR:-/logs/nginx}
+      - BACKEND_LOG_DIR=${BACKEND_LOG_DIR:-/logs/backend}
+      
+      # Notification Tracking
+      - NOTIFICATION_RETENTION_HOURS=${NOTIFICATION_RETENTION_HOURS:-24}
+    
+    entrypoint: ["/bin/sh"]
+    command: |
+      -c "
+      apk update &&
+      apk add --no-cache bash jq py3-pip curl docker-cli coreutils &&
+      pip3 install awscli --break-system-packages &&
+      bash /scripts/error-log-scanner.sh daemon
+      "
+    
+    networks:
+      - default
