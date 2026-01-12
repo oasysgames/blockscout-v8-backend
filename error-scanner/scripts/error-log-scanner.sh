@@ -7,7 +7,7 @@
 #
 # Configuration Priority:
 # 1. Environment variables (highest priority)
-# 2. .env file (docker-compose/envs/error-scanner.env)
+# 2. .env file (error-scanner/config/.env)
 # 3. Script defaults (lowest priority)
 # =============================================================================
 
@@ -61,7 +61,7 @@ fi
 
 # Retention period for notification tracking (hours)
 # Used only for manual cleanup (automatic cleanup is disabled)
-NOTIFICATION_RETENTION_HOURS="${NOTIFICATION_RETENTION_HOURS:-24}"
+NOTIFICATION_RETENTION_HOURS="${NOTIFICATION_RETENTION_HOURS:-720}"  # Default: 1 month (30 days * 24 hours)
 
 # Colors for output
 RED='\033[0;31m'
@@ -80,6 +80,29 @@ error() {
 
 warn() {
     echo -e "${YELLOW}[$(date '+%Y-%m-%d %H:%M:%S')] WARNING:${NC} $1"
+}
+
+# Helper function for date calculations (Alpine Linux compatible)
+# Calculates date relative to now using epoch seconds
+# Usage: date_relative <seconds_ago> <format>
+# Example: date_relative 60 '+%Y-%m-%dT%H:%M:%S'  # 1 minute ago
+date_relative() {
+    local seconds_ago="$1"
+    local format="${2:-'+%Y-%m-%d %H:%M:%S'}"
+    local epoch=$(($(date +%s) - seconds_ago))
+    
+    # Try GNU date first (supports -d @epoch)
+    if date -u -d "@${epoch}" "${format}" 2>/dev/null; then
+        return 0
+    fi
+    
+    # Try busybox date format (if available)
+    if date -u -D '%s' -d "${epoch}" "${format}" 2>/dev/null; then
+        return 0
+    fi
+    
+    # Fallback: use current date (better than failing)
+    date -u "${format}"
 }
 
 # Initialize notification tracking file
@@ -106,21 +129,26 @@ check_notification_sent() {
     
     init_notification_track
     
-    # Check transaction hash
+    local current_time=$(date +%s)
+    local cutoff_time=$((current_time - NOTIFICATION_RETENTION_HOURS * 3600))
+    
+    # Check transaction hash - only consider recent notifications (within retention period)
     if [ -n "$tx_hash" ]; then
-        if jq -e ".transactions[] | select(.hash == \"$tx_hash\")" "$NOTIFICATION_TRACK_FILE" >/dev/null 2>&1; then
-            return 0  # Already sent
+        local last_sent_time=$(jq -r ".transactions[] | select(.hash == \"$tx_hash\") | .timestamp" "$NOTIFICATION_TRACK_FILE" 2>/dev/null | head -1)
+        if [ -n "$last_sent_time" ] && [ "$last_sent_time" -gt "$cutoff_time" ]; then
+            return 0  # Already sent within retention period
         fi
     fi
     
-    # Check block number
+    # Check block number - only consider recent notifications (within retention period)
     if [ -n "$block_num" ]; then
-        if jq -e ".blocks[] | select(.number == \"$block_num\")" "$NOTIFICATION_TRACK_FILE" >/dev/null 2>&1; then
-            return 0  # Already sent
+        local last_sent_time=$(jq -r ".blocks[] | select(.number == \"$block_num\") | .timestamp" "$NOTIFICATION_TRACK_FILE" 2>/dev/null | head -1)
+        if [ -n "$last_sent_time" ] && [ "$last_sent_time" -gt "$cutoff_time" ]; then
+            return 0  # Already sent within retention period
         fi
     fi
     
-    return 1  # Not sent yet
+    return 1  # Not sent yet, or sent outside retention period (can send again)
 }
 
 # Mark notification as sent (with file locking to prevent race conditions)
@@ -357,7 +385,7 @@ send_slack_alert() {
     if [ $curl_exit_code -eq 0 ] && echo "$response" | grep -q "ok"; then
         log "Slack notification sent successfully"
         # Mark as sent immediately after successful send (only if not already marked)
-        if [ "$skip_check" != "true" ] && [ -n "$transaction_hash" ] || [ -n "$block_number" ]; then
+        if [ "$skip_check" != "true" ] && ([ -n "$transaction_hash" ] || [ -n "$block_number" ]); then
             # Double-check before marking to prevent race conditions
             if ! check_notification_sent "$transaction_hash" "$block_number"; then
                 mark_notification_sent "$transaction_hash" "$block_number" "$error_type"
@@ -779,6 +807,7 @@ scan_backend_logs() {
     local log_file="$1"
     local timestamp=$(date '+%Y%m%d_%H%M%S')
     local temp_file="/tmp/backend_error_scan_${timestamp}.log"
+    local individual_alerts_sent=0  # Track if individual alerts were sent
     
     log "Scanning backend error logs in: $log_file"
     
@@ -799,6 +828,15 @@ scan_backend_logs() {
             # Extract block number if present
             block_num=$(echo "$line" | jq -r '.block_number // .block_num // ""')
             
+            # Skip known non-critical errors that don't need alerts
+            if echo "$message" | grep -qi "Request Entity Too Large.*Cannot shrink batch further"; then
+                continue  # Skip this error - known issue, no alert needed
+            fi
+            # Skip timeout errors with :etimedout reason (network timeout, not critical)
+            if echo "$message" | grep -qi "failed to fetch.*Mint.TransportError.*reason: :etimedout"; then
+                continue  # Skip this error - network timeout, no alert needed
+            fi
+            
             # Determine error type
             error_type="backend_error"
             if echo "$message" | grep -q "timeout"; then
@@ -817,8 +855,9 @@ scan_backend_logs() {
                 error_type="backend_not_found"
             fi
             
-            # Only process backend_connection and backend_fetch errors - skip all others
-            if [ "$error_type" != "backend_connection" ] && [ "$error_type" != "backend_fetch" ] && [ "$error_type" != "backend_block_fetch" ]; then
+            # Process backend_connection, backend_fetch, and backend_timeout errors
+            # Timeout errors are critical for indexing issues
+            if [ "$error_type" != "backend_connection" ] && [ "$error_type" != "backend_fetch" ] && [ "$error_type" != "backend_block_fetch" ] && [ "$error_type" != "backend_timeout" ]; then
                 continue
             fi
             
@@ -848,6 +887,7 @@ scan_backend_logs() {
                     short_message="${short_message}..."
                 fi
                 send_slack_alert "🔴 Backend Error: $short_message" "$error_type" "$tx_hash" "$block_num" ""
+                individual_alerts_sent=1
             fi
         else
             # Plain text format - extract basic info
@@ -855,19 +895,40 @@ scan_backend_logs() {
             
             # Extract block number - handle multiple formats
             block_num=""
-            # Format 1: "for blocks [1, 5877948, ...]"
-            block_list=$(echo "$line" | grep -oE 'blocks\s*\[[0-9,\s]+\]' | grep -oE '\[[0-9,\s]+\]' | tr -d '[]' | tr ',' '\n' | tr -d ' ' | head -1)
+            # Format 1: "block_number [10987037, 10987038, ...]" (from error.log)
+            block_list=$(echo "$line" | grep -oE 'block_number\s*\[[0-9,\s]+\]' | grep -oE '\[[0-9,\s]+\]' | tr -d '[]' | tr ',' '\n' | tr -d ' ' | head -1)
             if [ -n "$block_list" ]; then
                 block_num="$block_list"
             else
-                # Format 2: "block_number: 1" or "block 123"
-                block_num=$(echo "$line" | grep -oE 'block[[:space:]]*[_:]?[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)
+                # Format 2: "for blocks [1, 5877948, ...]"
+                block_list=$(echo "$line" | grep -oE 'blocks\s*\[[0-9,\s]+\]' | grep -oE '\[[0-9,\s]+\]' | tr -d '[]' | tr ',' '\n' | tr -d ' ' | head -1)
+                if [ -n "$block_list" ]; then
+                    block_num="$block_list"
+                else
+                    # Format 3: "first_block_number=10986925 last_block_number=10986916"
+                    block_num=$(echo "$line" | grep -oE 'first_block_number=[0-9]+' | grep -oE '[0-9]+' | head -1)
+                    if [ -z "$block_num" ]; then
+                        # Format 4: "block_number: 1" or "block 123"
+                        block_num=$(echo "$line" | grep -oE 'block[[:space:]]*[_:]?[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)
+                    fi
+                fi
             fi
             
             # Extract all block numbers if present
             block_numbers=""
-            if echo "$line" | grep -q "for blocks \["; then
+            if echo "$line" | grep -q "block_number\s*\["; then
+                block_numbers=$(echo "$line" | grep -oE 'block_number\s*\[[0-9,\s]+\]' | grep -oE '\[[0-9,\s]+\]' | tr -d '[]' | tr ',' '|')
+            elif echo "$line" | grep -q "for blocks \["; then
                 block_numbers=$(echo "$line" | grep -oE 'blocks\s*\[[0-9,\s]+\]' | grep -oE '\[[0-9,\s]+\]' | tr -d '[]' | tr ',' '|')
+            fi
+            
+            # Skip known non-critical errors that don't need alerts
+            if echo "$line" | grep -qi "Request Entity Too Large.*Cannot shrink batch further"; then
+                continue  # Skip this error - known issue, no alert needed
+            fi
+            # Skip timeout errors with :etimedout reason (network timeout, not critical)
+            if echo "$line" | grep -qi "failed to fetch.*Mint.TransportError.*reason: :etimedout"; then
+                continue  # Skip this error - network timeout, no alert needed
             fi
             
             # Determine error type
@@ -890,8 +951,9 @@ scan_backend_logs() {
                 error_type="backend_not_found"
             fi
             
-            # Only process backend_connection and backend_fetch errors - skip all others
-            if [ "$error_type" != "backend_connection" ] && [ "$error_type" != "backend_fetch" ] && [ "$error_type" != "backend_block_fetch" ]; then
+            # Process backend_connection, backend_fetch, and backend_timeout errors
+            # Timeout errors are critical for indexing issues
+            if [ "$error_type" != "backend_connection" ] && [ "$error_type" != "backend_fetch" ] && [ "$error_type" != "backend_block_fetch" ] && [ "$error_type" != "backend_timeout" ]; then
                 continue
             fi
             
@@ -920,9 +982,19 @@ scan_backend_logs() {
                     short_message="${short_message}..."
                 fi
                 send_slack_alert "🔴 Backend Error: $short_message" "$error_type" "$tx_hash" "$block_num" ""
+                individual_alerts_sent=1
             fi
         fi
     done
+    
+    # Check if individual alerts were sent (need to check from outside the pipe)
+    local has_individual_alerts=0
+    if [ -f "$temp_file" ] && [ -s "$temp_file" ]; then
+        # Check if any errors have transaction hash or block number
+        if jq -e '[.[] | select(.transaction_hash != "" or .block_number != "")] | length > 0' "$temp_file" >/dev/null 2>&1; then
+            has_individual_alerts=1
+        fi
+    fi
     
     # Upload to S3 if errors found (only if AWS credentials are available)
     if [ -f "$temp_file" ] && [ -s "$temp_file" ]; then
@@ -943,19 +1015,35 @@ scan_backend_logs() {
         fi
         
         # Send Slack alert for backend errors (only if S3 upload succeeded or if we want to send without S3)
+        # NOTE: Summary notifications are disabled to prevent spam
+        # Individual error notifications with transaction/block context are sent instead
         if [ "$s3_upload_success" -eq 1 ] || [ -n "$SLACK_WEBHOOK_URL" ]; then
-            # Check for critical backend errors
+            # Check for critical backend errors (for logging only)
             local critical_errors=$(grep -E "(timeout|connection|critical)" "$log_file" | wc -l)
             local total_errors=$(wc -l < "$temp_file")
             
             log "Debug: Found $critical_errors critical backend errors out of $total_errors total errors"
             
-            # Send summary notifications (skip duplicate check for summaries)
-            if [ "$critical_errors" -gt 0 ]; then
-                send_slack_alert "🚨 Critical backend errors detected ($critical_errors critical, $total_errors total)" "backend_critical" "" "" "$s3_url" "true"
-            elif [ "$total_errors" -gt 0 ]; then
-                send_slack_alert "⚠️ Backend errors detected ($total_errors errors)" "backend_warning" "" "" "$s3_url" "true"
+            # Check if any errors have transaction hash or block number (individual alerts were sent)
+            # temp_file contains one JSON object per line, so we need to convert to array first
+            local has_individual_alerts=0
+            if jq -s -e '[.[] | select((.transaction_hash != "" and .transaction_hash != null) or (.block_number != "" and .block_number != null))] | length > 0' "$temp_file" >/dev/null 2>&1; then
+                has_individual_alerts=1
+                log "Individual alerts were sent for errors with transaction/block context"
             fi
+            
+            # Summary notifications are disabled to prevent spam
+            # Only individual error notifications with transaction/block context are sent
+            # if [ "$has_individual_alerts" -eq 0 ]; then
+            #     if [ "$critical_errors" -gt 0 ]; then
+            #         send_slack_alert "🚨 Critical backend errors detected ($critical_errors critical, $total_errors total)" "backend_critical" "" "" "$s3_url" "true"
+            #     elif [ "$total_errors" -gt 0 ]; then
+            #         send_slack_alert "⚠️ Backend errors detected ($total_errors errors)" "backend_warning" "" "" "$s3_url" "true"
+            #     fi
+            # else
+            #     log "Skipping summary notification - individual alerts already sent for errors with transaction/block context"
+            # fi
+            log "Summary notifications disabled - only individual error notifications are sent"
         fi
         
         # Clean up temp file
@@ -976,7 +1064,8 @@ monitor_docker_logs() {
     mkfifo "$pipe" 2>/dev/null || true
     
     # Start log streaming in background
-    docker logs -f --since="$(date -d '1 minute ago' '+%Y-%m-%dT%H:%M:%S')" "$container_name" > "$pipe" 2>&1 &
+    # Use helper function for Alpine Linux compatibility
+    docker logs -f --since="$(date_relative 60 '+%Y-%m-%dT%H:%M:%S')" "$container_name" > "$pipe" 2>&1 &
     local log_pid=$!
     
     # Monitor the pipe
@@ -1047,7 +1136,8 @@ monitor_docker_logs() {
             # Timeout reached, check if process is still running
             if ! kill -0 "$log_pid" 2>/dev/null; then
                 error "Docker log process died, restarting..."
-                docker logs -f --since="$(date -d '1 minute ago' '+%Y-%m-%dT%H:%M:%S')" "$container_name" > "$pipe" 2>&1 &
+                # Use helper function for Alpine Linux compatibility
+                docker logs -f --since="$(date_relative 60 '+%Y-%m-%dT%H:%M:%S')" "$container_name" > "$pipe" 2>&1 &
                 log_pid=$!
             fi
         fi
@@ -1061,7 +1151,8 @@ cleanup_old_logs() {
     find "$LOG_DIR" -name "*.log" -type f -mtime +7 -delete 2>/dev/null || true
     
     # Clean up old S3 logs (older than 30 days)
-    local cutoff_date=$(date -d '30 days ago' '+%Y-%m-%d')
+    # Use helper function for Alpine Linux compatibility (30 days = 2592000 seconds)
+    local cutoff_date=$(date_relative 2592000 '+%Y-%m-%d')
     
     # Try to cleanup old S3 logs (skip if AWS credentials are not available)
     if aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" --region "$AWS_REGION" 2>/dev/null | \
@@ -1087,7 +1178,8 @@ generate_error_report() {
     log "Generating error report..."
     
     # Get error logs from S3 for the last 24 hours (skip if AWS credentials are not available)
-    local start_date=$(date -d '24 hours ago' '+%Y-%m-%d')
+    # Use helper function for Alpine Linux compatibility (24 hours = 86400 seconds)
+    local start_date=$(date_relative 86400 '+%Y-%m-%d')
     
     echo "{\"report_date\":\"$(date -Iseconds)\",\"errors\":[" > "$report_file"
     
@@ -1232,7 +1324,7 @@ main() {
             echo "  SLACK_ICON_EMOJI     - Slack icon emoji (default: :warning:)"
             echo ""
             echo "Configuration files:"
-            echo "  docker-compose/envs/error-scanner.env - Main configuration file"
+            echo "  error-scanner/config/.env - Main configuration file"
             echo ""
             echo "Note: Configuration priority: Environment variables > .env file > Script defaults"
             exit 1

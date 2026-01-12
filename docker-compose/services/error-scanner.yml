@@ -4,15 +4,50 @@ services:
     container_name: 'error-scanner'
     restart: unless-stopped
     
+    # Resource limits to prevent impact on main system
+    # CPU: Limited to 0.5 cores (50% of 1 core)
+    # Memory: Limited to 512MB with soft limit at 256MB
+    # Note: For Docker Compose (non-swarm), use 'resources' instead of 'deploy.resources'
+    resources:
+      limits:
+        cpus: '0.5'
+        memory: 512M
+      reservations:
+        cpus: '0.1'
+        memory: 128M
+    
+    # Health check to monitor service status
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep -q '[e]rror-log-scanner.sh daemon' || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    
+    # Stop grace period - allow time for graceful shutdown
+    stop_grace_period: 30s
+    
+    # Logging configuration to prevent log bloat
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
+    
     # Volumes for logs, scripts, AWS credentials, and notification tracking
     volumes:
       # Read-only log directories
-      - ../logs:/logs:ro
-      - ../../scripts:/scripts:ro
-      # AWS credentials (if using IAM roles, this may not be needed)
+      - ./logs:/logs:ro
+      # Error scanner scripts and config (consolidated in error-scanner/ directory)
+      - ../../error-scanner/scripts:/scripts:ro
+      - ../../error-scanner/config:/config:ro
+      # AWS credentials (if using IAM roles, this is not needed)
+      # Note: Using IAM roles is recommended for better security
       - ~/.aws:/root/.aws:ro
-      # Docker socket for monitoring (optional)
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Docker socket removed for security - not needed for log scanning
+      # If real-time monitoring is required, consider using Docker API with proper authentication
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
       # Shared volume for notification tracking (prevents duplicate alerts)
       - ./notifications:/tmp/notifications:rw
     
@@ -20,7 +55,7 @@ services:
     # Priority: Environment variables > .env file > Script defaults
     # Load from .env file first, then allow environment variable overrides
     env_file:
-      - ../envs/error-scanner.env
+      - ../../error-scanner/config/.env
     
     # Environment variables (can override .env file values)
     # Format: ${VAR_NAME:-default_value} - uses environment/.env value, falls back to default
@@ -37,17 +72,29 @@ services:
       
       # Slack Configuration (from .env file or environment, with defaults)
       # Note: env_file values are loaded first, then can be overridden here
-      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      # SLACK_WEBHOOK_URL is loaded from env_file (error-scanner.env) by default
+      # To override, set SLACK_WEBHOOK_URL environment variable on host
+      # - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}  # Commented out to use env_file value
       - SLACK_USERNAME=${SLACK_USERNAME:-Error Scanner}
       - SLACK_ICON_EMOJI=${SLACK_ICON_EMOJI:-:warning:}
       
       # Log Directories (defaults, can be overridden)
+      # LOG_DIR: Main log directory - scans recursively for all .log files
+      # This will find logs in /logs/prod/, /logs/nginx/, etc.
       - LOG_DIR=${LOG_DIR:-/logs}
+      # NGINX_LOG_DIR: Nginx specific log directory
       - NGINX_LOG_DIR=${NGINX_LOG_DIR:-/logs/nginx}
-      - BACKEND_LOG_DIR=${BACKEND_LOG_DIR:-/logs/backend}
+      # BACKEND_LOG_DIR: Backend log directory
+      # Backend writes logs to /app/logs/prod/ (mounted from ./logs/:/app/logs/)
+      # So backend logs appear at /logs/prod/ when backend is running
+      # Note: LOG_DIR already scans recursively, so this is mainly for explicit backend log scanning
+      - BACKEND_LOG_DIR=${BACKEND_LOG_DIR:-/logs/prod}
       
       # Notification Tracking
-      - NOTIFICATION_RETENTION_HOURS=${NOTIFICATION_RETENTION_HOURS:-24}
+      # Retention period in hours - prevents duplicate notifications within this period
+      # After this period, same error can trigger notification again
+      # Default: 1 month (30 days * 24 hours = 720 hours)
+      - NOTIFICATION_RETENTION_HOURS=${NOTIFICATION_RETENTION_HOURS:-720}
     
     entrypoint: ["/bin/sh"]
     command: |

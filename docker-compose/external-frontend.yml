@@ -93,7 +93,6 @@ services:
       - backend
       - stats
       - sc-verifier
-      - error-scanner
     extends:
       file: ./services/nginx.yml
       service: proxy
@@ -102,7 +101,3 @@ services:
     extends:
       file: ./services/error-scanner.yml
       service: error-scanner
-    depends_on:
-      - backend
-      - stats
-      - sc-verifier
