@@ -11,7 +11,8 @@
 # 3. Script defaults (lowest priority)
 # =============================================================================
 
-set -e
+# Note: set -e is NOT used here to prevent daemon from stopping on errors
+# Errors are handled explicitly in daemon mode to ensure continuous monitoring
 
 # =============================================================================
 # Configuration Variables
@@ -61,7 +62,11 @@ fi
 
 # Retention period for notification tracking (hours)
 # Used only for manual cleanup (automatic cleanup is disabled)
-NOTIFICATION_RETENTION_HOURS="${NOTIFICATION_RETENTION_HOURS:-720}"  # Default: 1 month (30 days * 24 hours)
+# NOTE: Blockscout indexing scans each transaction/block only once. If an error occurs
+# and is not fixed, the same error will repeat continuously. This retention period
+# prevents spam notifications for the same error. After this period, the same error
+# can be notified again (useful for detecting long-term persistent issues).
+NOTIFICATION_RETENTION_HOURS="${NOTIFICATION_RETENTION_HOURS:-720}"  # Default: 30 days (720 hours)
 
 # Colors for output
 RED='\033[0;31m'
@@ -329,7 +334,7 @@ send_slack_alert() {
                     },
                     {
                         \"title\": \"Timestamp\",
-                        \"value\": \"$(date '+%Y-%m-%d %H:%M:%S UTC')\",
+                        \"value\": \"$(date -u '+%Y-%m-%d %H:%M:%S UTC')\",
                         \"short\": true
                     }"
     
@@ -1292,7 +1297,9 @@ main() {
             log "Starting error log scanner daemon..."
             
             while true; do
-                main scan
+                if ! main scan; then
+                    error "Scan failed, retrying in ${SCAN_INTERVAL}s..."
+                fi
                 sleep "$SCAN_INTERVAL"
             done
             ;;
