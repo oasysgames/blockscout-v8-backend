@@ -96,3 +96,8 @@ services:
     extends:
       file: ./services/nginx.yml
       service: proxy
+
+  error-scanner:
+    extends:
+      file: ./services/error-scanner.yml
+      service: error-scanner
