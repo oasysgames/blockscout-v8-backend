@@ -42,7 +42,7 @@ defmodule BlockScoutWeb.API.V2.MainPageController do
     # Use the optimized domain logic to fetch the latest 4 blocks for home page
     blocks =
       [paging_options: %PagingOptions{page_size: 4}, api?: true]
-      |> Chain.list_blocks_for_home()
+      |> Chain.list_blocks()
       |> Repo.replica().preload([
         [miner: [:names, :smart_contract, proxy_implementations_association()]],
         :transactions,
@@ -69,7 +69,7 @@ defmodule BlockScoutWeb.API.V2.MainPageController do
   end
 
   def transactions(conn, _params) do
-    recent_transactions = Chain.recent_collated_transactions_for_home(false, @transactions_options)
+    recent_transactions = Chain.recent_collated_transactions(false, @transactions_options)
 
     conn
     |> put_status(200)
