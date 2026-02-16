@@ -4,7 +4,10 @@ services:
   backend:
     # image: ghcr.io/blockscout/${DOCKER_REPO:-blockscout}:${DOCKER_TAG:-latest}
     image: blockscout-backend:v9.1.1
-    pull_policy: always
+    build:
+      context: ../../
+      dockerfile: docker/Dockerfile
+    pull_policy: if_not_present
     restart: always
     stop_grace_period: 5m
     container_name: 'backend'

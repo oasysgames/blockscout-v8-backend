@@ -5,16 +5,14 @@ services:
     restart: unless-stopped
     
     # Resource limits to prevent impact on main system
-    # CPU: Limited to 0.5 cores (50% of 1 core)
-    # Memory: Limited to 512MB with soft limit at 256MB
-    # Note: For Docker Compose (non-swarm), use 'resources' instead of 'deploy.resources'
-    resources:
-      limits:
-        cpus: '0.5'
-        memory: 512M
-      reservations:
-        cpus: '0.1'
-        memory: 128M
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
     
     # Health check to monitor service status
     healthcheck:

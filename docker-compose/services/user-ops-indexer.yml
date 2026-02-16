@@ -4,7 +4,6 @@ services:
   user-ops-indexer:
     image: ghcr.io/blockscout/user-ops-indexer:${USER_OPS_INDEXER_DOCKER_TAG:-latest}
     pull_policy: always
-    platform: linux/amd64
     restart: always
     container_name: 'user-ops-indexer'
     extra_hosts:
