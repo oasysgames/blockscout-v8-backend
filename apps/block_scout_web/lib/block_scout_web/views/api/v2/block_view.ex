@@ -76,9 +76,28 @@ defmodule BlockScoutWeb.API.V2.BlockView do
     |> chain_type_fields(block, single_block?)
   end
 
+  # When block has no rewards in DB (e.g. chain doesn't support fetch_beneficiaries), use priority_fee as validator reward
+  def prepare_rewards(rewards, block, single_block?)
+      when rewards in [nil, []] do
+    case fallback_reward_from_priority_fee(block) do
+      nil -> []
+      reward_map -> [reward_map]
+    end
+  end
+
   def prepare_rewards(rewards, block, single_block?) do
     Enum.map(rewards, &prepare_reward(&1, block, single_block?))
   end
+
+  defp fallback_reward_from_priority_fee(%{priority_fees: priority_fees})
+       when not is_nil(priority_fees) do
+    case Decimal.compare(priority_fees, 0) do
+      :gt -> %{"reward" => Decimal.to_string(Decimal.round(priority_fees)), "type" => "validator"}
+      _ -> nil
+    end
+  end
+
+  defp fallback_reward_from_priority_fee(_block), do: nil
 
   def prepare_reward(reward, block, single_block?) do
     %{
